@@ -1,0 +1,665 @@
+#!/bin/bash
+# jn - Terminal note-taking, journaling, and todo system with beautiful UI
+# Configuration
+NOTES_DIR="$HOME/.jn"
+EDITOR="nvim"
+DATE_FORMAT="%Y-%m-%d"
+TODAY=$(date +"$DATE_FORMAT")
+TODO_FILE="$NOTES_DIR/todo/tasks.md"
+TEMP_BEFORE="$NOTES_DIR/.temp_before"
+TEMP_AFTER="$NOTES_DIR/.temp_after"
+
+# Colors and formatting
+BOLD="\033[1m"
+RESET="\033[0m"
+BLUE="\033[34m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+CYAN="\033[36m"
+MAGENTA="\033[35m"
+RED="\033[31m"
+GRAY="\033[90m"
+WHITE="\033[97m"
+BG_BLUE="\033[44m"
+
+# Create storage directories
+mkdir -p "$NOTES_DIR/notes"
+mkdir -p "$NOTES_DIR/journal"
+mkdir -p "$NOTES_DIR/todo"
+mkdir -p "$NOTES_DIR/hooks"
+
+# Create todo file if it doesn't exist
+if [ ! -f "$TODO_FILE" ]; then
+    echo "# 待办事项" > "$TODO_FILE"
+    echo "" >> "$TODO_FILE"
+    echo "## 进行中" >> "$TODO_FILE"
+    echo "" >> "$TODO_FILE"
+    echo "## 已完成" >> "$TODO_FILE"
+    echo "" >> "$TODO_FILE"
+fi
+
+# Create Neovim hook scripts
+create_nvim_hook() {
+	local nvim_lua="$HOME/.config/nvim/init.lua" 
+    local HOOK_SCRIPT="$NOTES_DIR/hooks/extract_todos.vim"
+    # Create Neovim hook script
+    cat > "$HOOK_SCRIPT" << 'EOF'
+" Auto command: Save journal file content to temp file before saving
+autocmd BufWritePre */journal/*.md :call writefile(getline(1, '$'), expand('~/.jn/.temp_before'))
+" Auto command: Trigger todo extraction after saving journal file
+autocmd BufWritePost */journal/*.md :call writefile(getline(1, '$'), expand('~/.jn/.temp_after')) | :silent !~/.jn/hooks/process_journal.sh %
+" Set shortcut to add todo mark (optional)
+inoremap <C-t> - [ ]
+EOF
+    # Create processing script
+    local PROCESS_SCRIPT="$NOTES_DIR/hooks/process_journal.sh"
+    cat > "$PROCESS_SCRIPT" << 'EOF'
+#!/bin/bash
+# Journal processing script - extract todos
+JOURNAL_FILE="$1"
+NOTES_DIR="$HOME/.jn"
+TODO_FILE="$NOTES_DIR/todo/tasks.md"
+TEMP_AFTER="$NOTES_DIR/.temp_after"
+TODAY=$(date +"%Y-%m-%d")
+
+# Check if file exists
+if [ ! -f "$TEMP_AFTER" ]; then
+    exit 0
+fi
+
+# Extract todos
+extract_todos() {
+    local in_todo_section=false
+    local todos=()
+    while IFS= read -r line; do
+        # Find todo section start
+        if [[ "$line" =~ ^##[[:space:]]*(待办|代办|ToDo|Todo|to-do|TO-DO) ]]; then
+            in_todo_section=true
+            continue
+        fi
+        # Exit todo section if new heading found
+        if [[ "$in_todo_section" == true && "$line" =~ ^## ]]; then
+            in_todo_section=false
+            continue
+        fi
+        # If in todo section and line not empty, add to todo list
+        if [[ "$in_todo_section" == true && -n "$line" && ! "$line" =~ ^[[:space:]]*$ ]]; then
+            # Filter out leading spaces, dashes and brackets
+            cleaned_line=$(echo "$line" | sed -E 's/^[[:space:]]*-?[[:space:]]*\[[ xX]?\][[:space:]]*//')
+            # If cleaned line not empty, add to todo list
+            if [[ -n "$cleaned_line" ]]; then
+                todos+=("$cleaned_line")
+            fi
+        fi
+    done < "$TEMP_AFTER"
+    echo "${todos[@]}"
+}
+
+# Get todos
+todos=($(extract_todos))
+
+# If todos found, add to todo file
+if [ ${#todos[@]} -gt 0 ]; then
+    # Create temp file
+    tmp_file=$(mktemp)
+    # Find "in progress" section
+    in_progress=false
+    while IFS= read -r line; do
+        echo "$line" >> "$tmp_file"
+        if [[ "$line" == "## 进行中" ]]; then
+            in_progress=true
+            # Add new todos
+            for todo in "${todos[@]}"; do
+                # Check if todo already exists
+                if ! grep -q "^- $todo \[" "$TODO_FILE"; then
+                    echo "- $todo [$TODAY]" >> "$tmp_file"
+                fi
+            done
+        fi
+    done < "$TODO_FILE"
+    # If "in progress" section not found, create it
+    if [ "$in_progress" == false ]; then
+        echo "## 进行中" >> "$tmp_file"
+        for todo in "${todos[@]}"; do
+            echo "- $todo [$TODAY]" >> "$tmp_file"
+        done
+    fi
+    # Update todo file
+    mv "$tmp_file" "$TODO_FILE"
+fi
+
+# Clean up temp files
+rm -f "$TEMP_AFTER"
+exit 0
+EOF
+    # Make script executable
+    chmod +x "$PROCESS_SCRIPT"
+    # Create nvim init file
+    local NVIM_INIT="$NOTES_DIR/hooks/init.vim"
+    cat > "$NVIM_INIT" << EOF
+" Load todo extraction hook
+source $nvim_lua
+source $HOOK_SCRIPT
+EOF
+}
+
+# Create necessary hook scripts
+create_nvim_hook
+
+# Center text in terminal
+center_text() {
+    local text="$1"
+    local style="${2:-}"
+    local termwidth=$(tput cols)
+    local textwidth=${#text}
+    local padding=$(( (termwidth - textwidth) / 2 ))
+    printf "%${padding}s$style%s$RESET\n" "" "$text"
+}
+
+# Print a styled header
+print_header() {
+    local text="$1"
+    local style="${2:-$BOLD$BLUE}"
+    local width=$(tput cols 2>/dev/null || echo 80)  # 防止 tput 失败
+    local line=$(printf "%${width}s" "" | tr " " "-")  # 用 "-" 代替 "─"
+    
+    echo -e "$line$RESET"
+    center_text "$text" "$BOLD"
+    echo -e "$line$RESET"
+    echo ""
+}
+
+# Print a section header
+print_section() {
+    local text="$1"
+    local style="${2:-$CYAN}"
+    echo ""
+    center_text "== $text ==" "$style$BOLD"
+    echo ""
+}
+
+# Print a styled option
+print_option() {
+    local number="$1"
+    local text="$2"
+    local color="${3:-$WHITE}"
+    echo -e "  ${YELLOW}$number${RESET}) $color$text$RESET"
+}
+
+# Print todo item
+print_todo() {
+    local number="$1"
+    local text="$2"
+    local status="${3:-pending}"
+    
+    if [ "$status" == "done" ]; then
+        echo -e "   ${GREEN}✓${RESET} ${GRAY}$text${RESET}"
+    else
+        echo -e "   ${YELLOW}$number${RESET}) $text"
+    fi
+}
+
+# Help information
+show_help() {
+    print_header "jn - 终端笔记、日记和待办事项系统" "$BLUE"
+    echo "用法:"
+    echo -e "  ${YELLOW}jn${RESET}                    显示主界面"
+    echo -e "  ${YELLOW}jn today${RESET}              打开今天的日记"
+    echo -e "  ${YELLOW}jn journal${RESET} [日期]      打开指定日期的日记（默认今天）"
+    echo -e "  ${YELLOW}jn note${RESET} <标题>         创建或编辑笔记"
+    echo -e "  ${YELLOW}jn todo${RESET}               查看待办事项"
+    echo -e "  ${YELLOW}jn todo add${RESET} <内容>     添加待办事项"
+    echo -e "  ${YELLOW}jn todo done${RESET} <编号>    将待办事项标记为已完成"
+    echo -e "  ${YELLOW}jn todo edit${RESET}          编辑待办事项列表"
+    echo -e "  ${YELLOW}jn list notes${RESET}         列出所有笔记"
+    echo -e "  ${YELLOW}jn list journal${RESET}       列出所有日记"
+    echo -e "  ${YELLOW}jn search${RESET} <关键词>     搜索笔记和日记"
+    echo -e "  ${YELLOW}jn help${RESET}               显示帮助信息"
+}
+
+# Display main menu
+show_main_menu() {
+    clear
+    print_header "jn" "$BOLD$BG_BLUE$WHITE"
+    center_text "今天日期: $TODAY" "$YELLOW"
+    echo ""
+    
+    print_section "待办事项" "$GREEN"
+    show_pending_todos
+    
+    print_section "选项" "$CYAN"
+    print_option "1" "打开今天的日记"
+    print_option "2" "打开指定日期的日记"
+    print_option "3" "创建/编辑笔记"
+    print_option "4" "管理待办事项"
+    print_option "5" "列出所有笔记"
+    print_option "6" "列出所有日记"
+    print_option "7" "搜索"
+    print_option "8" "帮助"
+    print_option "0" "退出" "$RED"
+    
+    echo ""
+    echo -ne "${CYAN}请选择 [0-8]: ${RESET}"
+    read choice
+    case "$choice" in
+        1) open_journal "$TODAY" ;;
+        2)
+            echo -ne "${CYAN}输入日期 [$DATE_FORMAT]: ${RESET}"
+            read date
+            open_journal "${date:-$TODAY}"
+            ;;
+        3)
+            echo -ne "${CYAN}输入笔记标题: ${RESET}"
+            read title
+            open_note "$title"
+            ;;
+        4) show_todo_menu ;;
+        5) list_entries "notes"; echo ""; echo -e "${YELLOW}按回车键继续...${RESET}"; read ;;
+        6) list_entries "journal"; echo ""; echo -e "${YELLOW}按回车键继续...${RESET}"; read ;;
+        7)
+            echo -ne "${CYAN}输入搜索关键词: ${RESET}"
+            read keyword
+            search_entries "$keyword"
+            echo ""
+            echo -e "${YELLOW}按回车键继续...${RESET}"
+            read
+            ;;
+        8) show_help; echo ""; echo -e "${YELLOW}按回车键继续...${RESET}"; read ;;
+        0) 
+            clear
+            center_text "感谢使用 NOTE SYSTEM" "$GREEN$BOLD"
+            echo ""
+            exit 0 
+            ;;
+        *) echo -e "${RED}无效选择${RESET}"; sleep 1 ;;
+    esac
+    # Return to main menu
+    show_main_menu
+}
+
+# Display todo menu
+show_todo_menu() {
+    clear
+    print_header "待办事项管理" "$GREEN"
+    show_todos
+    
+    print_section "选项" "$CYAN"
+    print_option "1" "添加新待办事项"
+    print_option "2" "将待办事项标记为已完成" 
+    print_option "3" "编辑待办事项列表"
+    print_option "4" "返回主菜单" "$YELLOW"
+    
+    echo ""
+    echo -ne "${CYAN}请选择 [1-4]: ${RESET}"
+    read choice
+    case "$choice" in
+        1)
+            echo -ne "${CYAN}输入待办事项内容: ${RESET}"
+            read content
+            add_todo "$content"
+            ;;
+        2)
+            echo -ne "${CYAN}输入待办事项编号: ${RESET}"
+            read number
+            complete_todo "$number"
+            ;;
+        3)
+            edit_todos
+            ;;
+        4)
+            return
+            ;;
+        *)
+            echo -e "${RED}无效选择${RESET}"
+            sleep 1
+            ;;
+    esac
+    # Return to todo menu
+    show_todo_menu
+}
+
+# Show pending todos
+show_pending_todos() {
+    # Extract in-progress section and show first 5 items
+    local count=0
+    local in_progress=false
+    while IFS= read -r line; do
+        if [[ "$line" == "## 进行中" ]]; then
+            in_progress=true
+            continue
+        fi
+        if [[ "$line" == "## "* ]] && [[ "$in_progress" == true ]]; then
+            break
+        fi
+        if [[ "$in_progress" == true ]] && [[ "$line" =~ ^-\ .* ]]; then
+            count=$((count+1))
+            print_todo "$count" "${line:2}"
+            if [ "$count" -ge 5 ]; then
+                echo -e "   ${GRAY}...${RESET}"
+                break
+            fi
+        fi
+    done < "$TODO_FILE"
+    if [ "$count" -eq 0 ]; then
+        echo -e "   ${GRAY}(无待办事项)${RESET}"
+    fi
+}
+
+# Show all todos
+show_todos() {
+    center_text "进行中" "$GREEN$BOLD"
+    local count=0
+    local in_progress=false
+    while IFS= read -r line; do
+        if [[ "$line" == "## 进行中" ]]; then
+            in_progress=true
+            continue
+        fi
+        if [[ "$line" == "## "* ]] && [[ "$in_progress" == true ]]; then
+            break
+        fi
+        if [[ "$in_progress" == true ]] && [[ "$line" =~ ^-\ .* ]]; then
+            count=$((count+1))
+            print_todo "$count" "${line:2}"
+        fi
+    done < "$TODO_FILE"
+    if [ "$count" -eq 0 ]; then
+        echo -e "   ${GRAY}(无待办事项)${RESET}"
+    fi
+    
+    echo ""
+    center_text "最近完成" "$BLUE$BOLD"
+    local done_count=0
+    local in_done=false
+    while IFS= read -r line; do
+        if [[ "$line" == "## 已完成" ]]; then
+            in_done=true
+            continue
+        fi
+        if [[ "$line" == "## "* ]] && [[ "$in_done" == true ]]; then
+            break
+        fi
+        if [[ "$in_done" == true ]] && [[ "$line" =~ ^-\ .* ]]; then
+            done_count=$((done_count+1))
+            print_todo "" "${line:2}" "done"
+            if [ "$done_count" -ge 5 ]; then
+                echo -e "   ${GRAY}...${RESET}"
+                break
+            fi
+        fi
+    done < "$TODO_FILE"
+    if [ "$done_count" -eq 0 ]; then
+        echo -e "   ${GRAY}(无已完成事项)${RESET}"
+    fi
+}
+
+# Add todo item
+add_todo() {
+    local content="$1"
+    if [ -z "$content" ]; then
+        echo -e "${RED}错误: 待办事项内容不能为空${RESET}"
+        return 1
+    fi
+    # Find "in progress" section and insert new todo
+    local tmp_file=$(mktemp)
+    local found=false
+    while IFS= read -r line; do
+        echo "$line" >> "$tmp_file"
+        if [[ "$line" == "## 进行中" ]]; then
+            echo "- $content [$TODAY]" >> "$tmp_file"
+            found=true
+        fi
+    done < "$TODO_FILE"
+    if [ "$found" == false ]; then
+        echo "## 进行中" >> "$tmp_file"
+        echo "- $content [$TODAY]" >> "$tmp_file"
+    fi
+    mv "$tmp_file" "$TODO_FILE"
+    echo -e "${GREEN}已添加待办事项${RESET}"
+    sleep 1
+}
+
+# Mark todo as done
+complete_todo() {
+    local number="$1"
+    if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}错误: 请输入有效的编号${RESET}"
+        return 1
+    fi
+    # Find and move specified todo item
+    local tmp_file=$(mktemp)
+    local count=0
+    local task=""
+    local in_progress=false
+    local removed=false
+    # First pass: find and remove todo
+    while IFS= read -r line; do
+        if [[ "$line" == "## 进行中" ]]; then
+            in_progress=true
+            echo "$line" >> "$tmp_file"
+            continue
+        fi
+        if [[ "$line" == "## "* ]] && [[ "$in_progress" == true ]]; then
+            in_progress=false
+        fi
+        if [[ "$in_progress" == true ]] && [[ "$line" =~ ^-\ .* ]]; then
+            count=$((count+1))
+            if [ "$count" -eq "$number" ]; then
+                task="$line"
+                removed=true
+                continue
+            fi
+        fi
+        echo "$line" >> "$tmp_file"
+    done < "$TODO_FILE"
+    if [ "$removed" == false ]; then
+        echo -e "${RED}错误: 未找到编号为 $number 的待办事项${RESET}"
+        rm "$tmp_file"
+        return 1
+    fi
+    # Second pass: add task to done section
+    local tmp_file2=$(mktemp)
+    local found=false
+    while IFS= read -r line; do
+        echo "$line" >> "$tmp_file2"
+        if [[ "$line" == "## 已完成" ]]; then
+            echo "$task ✓ [完成于 $TODAY]" >> "$tmp_file2"
+            found=true
+        fi
+    done < "$tmp_file"
+    if [ "$found" == false ]; then
+        echo "## 已完成" >> "$tmp_file2"
+        echo "$task ✓ [完成于 $TODAY]" >> "$tmp_file2"
+    fi
+    mv "$tmp_file2" "$TODO_FILE"
+    rm -f "$tmp_file"
+    echo -e "${GREEN}已将待办事项标记为完成${RESET}"
+    sleep 1
+}
+
+# Edit todo list
+edit_todos() {
+    $EDITOR "$TODO_FILE"
+}
+
+# Open journal
+open_journal() {
+    local date=${1:-$TODAY}
+    local file="$NOTES_DIR/journal/$date.md"
+    # If file doesn't exist, create new file with title
+    if [ ! -f "$file" ]; then
+        echo "# 日记: $date" > "$file"
+        echo "" >> "$file"
+        echo "## 今日记录" >> "$file"
+        echo "" >> "$file"
+        echo "## 待办" >> "$file"
+        echo "" >> "$file"
+        # Add today's todos
+        local in_progress=false
+        while IFS= read -r line; do
+            if [[ "$line" == "## 进行中" ]]; then
+                in_progress=true
+                continue
+            fi
+            if [[ "$line" == "## "* ]] && [[ "$in_progress" == true ]]; then
+                break
+            fi
+            if [[ "$in_progress" == true ]] && [[ "$line" =~ ^-\ .* ]]; then
+                echo "- [ ] ${line:2}" >> "$file"
+            fi
+        done < "$TODO_FILE"
+    fi
+    # Open file with nvim and custom config
+    NVIM_COMMAND="nvim -u $NOTES_DIR/hooks/init.vim $file"
+    eval $NVIM_COMMAND
+}
+
+# Create or edit note
+open_note() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}错误: 请提供笔记标题${RESET}"
+        return 1
+    fi
+    local title="$1"
+    local filename=$(echo "$title" | tr ' ' '_' | tr '[:upper:]' '[:lower:]')
+    local file="$NOTES_DIR/notes/$filename.md"
+    # If file doesn't exist, create with title
+    if [ ! -f "$file" ]; then
+        echo "# $title" > "$file"
+        echo "" >> "$file"
+        echo "创建于: $TODAY" >> "$file"
+        echo "" >> "$file"
+        echo "## 相关待办" >> "$file"
+        echo "" >> "$file"
+    fi
+    $EDITOR "$file"
+}
+
+# List notes or journals
+list_entries() {
+    local type="$1"
+    local dir=""
+    case "$type" in
+        "notes")
+            dir="$NOTES_DIR/notes"
+            print_header "笔记列表" "$MAGENTA"
+            ;;
+        "journal")
+            dir="$NOTES_DIR/journal"
+            print_header "日记列表" "$BLUE"
+            ;;
+        *)
+            echo -e "${RED}错误: 未知类型 '$type'${RESET}"
+            return 1
+            ;;
+    esac
+    if [ -d "$dir" ]; then
+        find "$dir" -name "*.md" -type f | sort | while read file; do
+            local filename=$(basename "$file" .md)
+            local title=$(head -n 1 "$file" | sed 's/^# //')
+            echo -e "- ${CYAN}$filename${RESET}: $title"
+        done
+    fi
+}
+
+# Search notes and journals
+search_entries() {
+    local keyword="$1"
+    if [ -z "$keyword" ]; then
+        echo -e "${RED}错误: 请提供搜索关键词${RESET}"
+        return 1
+    fi
+    
+    print_header "搜索结果: '$keyword'" "$YELLOW"
+    
+    # Search notes
+    print_section "笔记中" "$MAGENTA"
+    local found_notes=false
+    grep -l "$keyword" "$NOTES_DIR/notes"/*.md 2>/dev/null | while read file; do
+        local title=$(head -n 1 "$file" | sed 's/^# //')
+        echo -e "- ${CYAN}$(basename "$file" .md)${RESET}: $title"
+        found_notes=true
+    done
+    if [ "$found_notes" == false ]; then
+        echo -e "${GRAY}(未找到结果)${RESET}"
+    fi
+    
+    # Search journals
+    print_section "日记中" "$BLUE"
+    local found_journals=false
+    grep -l "$keyword" "$NOTES_DIR/journal"/*.md 2>/dev/null | while read file; do
+        local date=$(basename "$file" .md)
+        echo -e "- ${CYAN}$date${RESET}"
+        found_journals=true
+    done
+    if [ "$found_journals" == false ]; then
+        echo -e "${GRAY}(未找到结果)${RESET}"
+    fi
+    
+    # Search todos
+    print_section "待办事项中" "$GREEN"
+    if grep -q "$keyword" "$TODO_FILE" 2>/dev/null; then
+        grep -n "$keyword" "$TODO_FILE" | grep -E "^[0-9]+:- " | while read -r line; do
+            echo -e "- ${line#*:- }"
+        done
+    else
+        echo -e "${GRAY}(未找到结果)${RESET}"
+    fi
+}
+
+# Main function
+main() {
+    local command=${1:-"menu"}
+    shift || true
+    case "$command" in
+        "menu"|"")
+            show_main_menu
+            ;;
+        "today")
+            open_journal "$TODAY"
+            ;;
+        "journal")
+            open_journal "$1"
+            ;;
+        "note")
+            open_note "$1"
+            ;;
+        "todo")
+            if [ -z "$1" ]; then
+                show_todo_menu
+            else
+                case "$1" in
+                    "add")
+                        add_todo "$2"
+                        ;;
+                    "done")
+                        complete_todo "$2"
+                        ;;
+                    "edit")
+                        edit_todos
+                        ;;
+                    *)
+                        echo -e "${RED}未知的待办事项命令: $1${RESET}"
+                        show_help
+                        ;;
+                esac
+            fi
+            ;;
+        "list")
+            list_entries "$1"
+            ;;
+        "search")
+            search_entries "$1"
+            ;;
+        "help")
+            show_help
+            ;;
+        *)
+            # If command is none of the above, assume it's a note title
+            open_note "$command"
+            ;;
+    esac
+}
+
+# Run main function
+main "$@"
