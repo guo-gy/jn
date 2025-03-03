@@ -2,7 +2,7 @@
 日记+笔记+代办管理 自己平时使用的
 
 ## preview
-![Alt Text](https://github.com/guo-gy/jn/edit/main/pewview.png)
+![preview](https://github.com/guo-gy/jn/blob/main/preview.png)
 
 ## 功能
 日记笔记管理
